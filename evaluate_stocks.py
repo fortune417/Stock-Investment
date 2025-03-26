@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import os
 
+__version__ = "0.0.1"
+
 # Function to calculate Compound Annual Growth Rate (CAGR)
 def calculate_cagr(data, dates):
     """
@@ -100,6 +102,7 @@ def parse_args():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--list", type=str, help="Comma-separated list of stock symbols (e.g., AAPL,MSFT,GOOGL).")
     group.add_argument("--file", type=str, help="Path to a file containing stock symbols (one per line).")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--output", type=str, default="stock_analysis_results.csv", help="Path to save the output CSV file.")
     parser.add_argument("--outdir", type=str, default=".", help="Directory to save output files (default: current directory)")
     parser.add_argument("--years", type=int, default=5, help="Number of years of historical data to analyze (default: 5)")
