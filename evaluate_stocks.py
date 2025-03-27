@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 # Function to calculate Compound Annual Growth Rate (CAGR)
 def calculate_cagr(data, dates):
@@ -43,7 +43,7 @@ def calculate_cagr(data, dates):
         # Calculate year-over-year growth rates with actual time periods
         growth_rates = []
         for i in range(len(valid_data)-1):
-            if valid_data[i] <= 0:  # Skip negative or zero values
+            if valid_data[i] <= 0 or valid_data[i+1] <=0:  # Skip negative or zero values
                 continue
                 
             # Calculate actual years between data points
@@ -94,6 +94,8 @@ def calculate_dcf(free_cash_flow, growth_rate, shares_outstanding, discount_rate
 def read_stock_symbols(file_path):
     with open(file_path, "r") as file:
         symbols = [line.strip() for line in file if line.strip()]
+        # Remove duplicates and convert to uppercase
+        symbols = list(set([symbol.upper() for symbol in symbols]))
     return symbols
 
 # Parse command-line arguments using argparse
@@ -103,10 +105,11 @@ def parse_args():
     group.add_argument("--list", type=str, help="Comma-separated list of stock symbols (e.g., AAPL,MSFT,GOOGL).")
     group.add_argument("--file", type=str, help="Path to a file containing stock symbols (one per line).")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--output", type=str, default="stock_analysis_results.csv", help="Path to save the output CSV file.")
+    parser.add_argument("--output", type=str, default="stock_analysis_results.csv", help="Path to save the output CSV file. (default: %(default)s)")
     parser.add_argument("--outdir", type=str, default=".", help="Directory to save output files (default: current directory)")
-    parser.add_argument("--years", type=int, default=5, help="Number of years of historical data to analyze (default: 5)")
-    parser.add_argument("--terminal-rate", type=float, default=0.05, help="Terminal growth rate for DCF calculation (default: 0.05)")
+    parser.add_argument("--years", type=int, default=5, help="Number of years of historical data to analyze (default: %(default)s)")
+    parser.add_argument("--terminal-rate", type=float, default=0.05, help="Terminal growth rate for DCF calculation (default: %(default)s)")
+    parser.add_argument("--discount-rate", type=float, default=0.1, help="Discount rate for DCF calculation (default: %(default)s)")
     return parser.parse_args()
 
 def save_financial_data(data, symbol, data_type, output_dir):
@@ -191,6 +194,12 @@ def main():
             fcf = fcf_data.values
             fcf_dates = fcf_data.index
             
+            # Extract cash and debt data
+            cash_data = balance_sheet.loc["Cash And Cash Equivalents"][:args.years]
+            cash = cash_data.values
+            total_debt_data = balance_sheet.loc["Total Debt"][:args.years]
+            total_debt = total_debt_data.values
+
             # Calculate ratios (data is already sorted)
             debt_to_equity = balance_sheet.loc["Total Debt"][:args.years].values / balance_sheet.loc["Stockholders Equity"][:args.years].values
             debt_to_assets = balance_sheet.loc["Total Debt"][:args.years].values / balance_sheet.loc["Total Assets"][:args.years].values
@@ -218,6 +227,7 @@ def main():
                 growth_rate=revenue_cagr,
                 shares_outstanding=shares_outstanding,
                 terminal_growth_rate=args.terminal_rate,
+                discount_rate=args.discount_rate,
                 years=args.years
             )
             dcf_value_10pct_growth = calculate_dcf(
@@ -225,6 +235,7 @@ def main():
                 growth_rate=0.10,
                 shares_outstanding=shares_outstanding,
                 terminal_growth_rate=args.terminal_rate,
+                discount_rate=args.discount_rate,
                 years=args.years
             )
 
@@ -245,6 +256,8 @@ def main():
                 "ROE (Latest)": roe[0],
                 "Net Margin (Latest)": net_margin[0],
                 "Book Value Per Share (Latest)": book_value_per_share[0],
+                "Cash & Equivalents (Latest)": cash[0],
+                "Total Debt (Latest)": total_debt[0],
             }
 
             # Add historical data for each year
@@ -257,6 +270,8 @@ def main():
                 result[f"ROE ({year.year})"] = roe[i]
                 result[f"Net Margin ({year.year})"] = net_margin[i]
                 result[f"Book Value Per Share ({year.year})"] = book_value_per_share[i]
+                result[f"Cash & Equivalents ({year.year})"] = cash[i]
+                result[f"Total Debt ({year.year})"] = total_debt[i]
 
             results.append(result)
 
