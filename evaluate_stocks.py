@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 # Function to calculate Compound Annual Growth Rate (CAGR)
 def calculate_cagr(data, dates):
@@ -74,7 +74,11 @@ def calculate_dcf(free_cash_flow, growth_rate, shares_outstanding, discount_rate
     """Calculate DCF fair value per share"""
     if shares_outstanding <= 0:
         return 0
-        
+    
+    # Check for invalid growth rates for terminal case
+    if terminal_growth_rate >= discount_rate:
+        return 0
+    
     dcf_value = 0
     for year in range(1, years + 1):
         future_fcf = free_cash_flow * (1 + growth_rate) ** year
@@ -89,6 +93,68 @@ def calculate_dcf(free_cash_flow, growth_rate, shares_outstanding, discount_rate
     # Add terminal value to DCF and convert to per-share value
     total_value = dcf_value + discounted_terminal_value
     return total_value / shares_outstanding
+
+def calculate_wacc(stock, risk_free_rate=0.035, market_return=0.1, tax_rate=0.21):
+    """
+    This function computes the WACC for a given stock using financial data 
+    retrieved from a yfinance Ticker object. The WACC is calculated as a 
+    weighted average of the cost of equity and the after-tax cost of debt.
+
+    Args:
+        stock (yfinance.Ticker): The stock object containing financial data.
+        risk_free_rate (float, optional): The risk-free rate, typically based 
+            on the 10-year Treasury yield. Default is 0.035 (3.5%).
+        market_return (float, optional): The expected market return. Default is 0.1 (10%).
+        tax_rate (float, optional): The corporate tax rate. Default is 0.21 (21%).
+
+    Returns:
+        float: The calculated WACC value. Returns None if the calculation 
+            is not possible due to missing or invalid data.
+
+    Raises:
+        Exception: If an error occurs during the calculation, it is caught 
+            and logged, and the function returns None.
+    """
+    try:
+        # Get required data
+        market_price = stock.history(period="1d")["Close"].iloc[-1]
+        shares_outstanding = stock.info.get("sharesOutstanding", 0)
+        total_debt = stock.balance_sheet.loc["Total Debt"].iloc[0]  # Most recent
+
+        # Calculate market cap
+        market_cap = market_price * shares_outstanding
+
+        # Calculate weights
+        total_capital = market_cap + total_debt
+        if total_capital <= 0:
+            return None
+
+        equity_weight = market_cap / total_capital
+        debt_weight = total_debt / total_capital
+
+        # Cost of Equity using CAPM
+        beta = stock.info.get("beta", 1.0)  # Default to 1.0 if not available
+        market_risk_premium = market_return - risk_free_rate  # Typical market risk premium: 6%, market return - risk-free rate
+        cost_of_equity = risk_free_rate + beta * market_risk_premium
+
+        # Cost of Debt (using latest interest expense / total debt)
+        try:
+            interest_expense = abs(stock.financials.loc["Interest Expense"].iloc[0])
+            cost_of_debt = interest_expense / total_debt
+        except:
+            cost_of_debt = 0.05  # Default to 5% if calculation fails
+
+        # Apply tax shield to cost of debt (assuming 21% corporate tax rate)
+        after_tax_cost_of_debt = cost_of_debt * (1 - tax_rate)
+
+        # Calculate WACC
+        wacc = (equity_weight * cost_of_equity) + (debt_weight * after_tax_cost_of_debt)
+
+        return max(wacc, 0.05)  # Ensure minimum discount rate of 5%
+
+    except Exception as e:
+        print(f"WACC calculation error: {str(e)}")
+        return None
 
 # Read stock symbols from input file
 def read_stock_symbols(file_path):
@@ -110,6 +176,11 @@ def parse_args():
     parser.add_argument("--years", type=int, default=5, help="Number of years of historical data to analyze (default: %(default)s)")
     parser.add_argument("--terminal-rate", type=float, default=0.05, help="Terminal growth rate for DCF calculation (default: %(default)s)")
     parser.add_argument("--discount-rate", type=float, default=0.1, help="Discount rate for DCF calculation (default: %(default)s)")
+    parser.add_argument("--fixed-growth", type=float, default=0.10, 
+                       help="Fixed growth rate for alternative DCF calculation (default: %(default)s)")
+    parser.add_argument("--risk-free-rate", type=float, default=0.035, help="Risk-free rate for WACC calculation (default: %(default)s)")
+    parser.add_argument("--market-return", type=float, default=0.1, help="Market return for WACC calculation (default: %(default)s)")
+    parser.add_argument("--tax-rate", type=float, default=0.21, help="Tax rate for WACC calculation (default: %(default)s)")
     return parser.parse_args()
 
 def save_financial_data(data, symbol, data_type, output_dir):
@@ -220,9 +291,34 @@ def main():
                 print(f"Warning: Invalid shares outstanding for {symbol}")
                 continue
 
-            # Calculate DCF fair value using revenue growth rate and user-specified terminal rate
+            # Calculate WACC for discount rate
+            wacc = calculate_wacc(
+                stock,
+                risk_free_rate=args.risk_free_rate,
+                market_return=args.market_return,
+                tax_rate=args.tax_rate
+            )
+            
+            # Get current stock price
+            current_price = stock.history(period="1d")["Close"].iloc[-1]
+            
+            # Calculate DCF with different scenarios
             latest_fcf = fcf[0]
-            dcf_value_5yr_growth = calculate_dcf(
+            
+            # 1. DCF with revenue CAGR and WACC
+            dcf_value_cagr_wacc = "N/A"
+            if wacc is not None:
+                dcf_value_cagr_wacc = calculate_dcf(
+                    free_cash_flow=latest_fcf,
+                    growth_rate=revenue_cagr,
+                    shares_outstanding=shares_outstanding,
+                    terminal_growth_rate=args.terminal_rate,
+                    discount_rate=wacc,
+                    years=args.years
+                )
+            
+            # 2. DCF with revenue CAGR and fixed discount rate
+            dcf_value_cagr_fixed = calculate_dcf(
                 free_cash_flow=latest_fcf,
                 growth_rate=revenue_cagr,
                 shares_outstanding=shares_outstanding,
@@ -230,26 +326,42 @@ def main():
                 discount_rate=args.discount_rate,
                 years=args.years
             )
-            dcf_value_10pct_growth = calculate_dcf(
+            
+            # 3. DCF with fixed growth rate and WACC
+            dcf_value_fixed_wacc = "N/A"
+            if wacc is not None:
+                dcf_value_fixed_wacc = calculate_dcf(
+                    free_cash_flow=latest_fcf,
+                    growth_rate=args.fixed_growth,
+                    shares_outstanding=shares_outstanding,
+                    terminal_growth_rate=args.terminal_rate,
+                    discount_rate=wacc,
+                    years=args.years
+                )
+            
+            # 4. DCF with fixed growth rate and discount rate
+            dcf_value_fixed_both = calculate_dcf(
                 free_cash_flow=latest_fcf,
-                growth_rate=0.10,
+                growth_rate=args.fixed_growth,
                 shares_outstanding=shares_outstanding,
                 terminal_growth_rate=args.terminal_rate,
                 discount_rate=args.discount_rate,
                 years=args.years
             )
-
-            # Get current stock price
-            current_price = stock.history(period="1d")["Close"].iloc[-1]
-
-            # Store results
+            
+            # Update results dictionary
             result = {
                 "Symbol": symbol,
                 "Revenue CAGR": revenue_cagr,
                 "EPS CAGR": eps_cagr,
                 "FCF CAGR": fcf_cagr,
-                "DCF Fair Value (5yr Growth)": dcf_value_5yr_growth,
-                "DCF Fair Value (10% Growth)": dcf_value_10pct_growth,
+                "Fixed growth rate": args.fixed_growth,
+                "Fixed discount rate": args.discount_rate,
+                "WACC": wacc if wacc is not None else "N/A",
+                "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,
+                "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,
+                f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,
+                f"DCF ({args.fixed_growth:.1%} growth, Fixed Rate)": dcf_value_fixed_both,
                 "Current Price": current_price,
                 "Debt to Equity Ratio (Latest)": debt_to_equity[0],
                 "Debt to Asset Ratio (Latest)": debt_to_assets[0],
@@ -258,6 +370,7 @@ def main():
                 "Book Value Per Share (Latest)": book_value_per_share[0],
                 "Cash & Equivalents (Latest)": cash[0],
                 "Total Debt (Latest)": total_debt[0],
+                #"Discount Rate Used": discount_rate,
             }
 
             # Add historical data for each year
