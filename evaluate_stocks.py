@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import os
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 
 # Function to calculate Compound Annual Growth Rate (CAGR)
 def calculate_cagr(data, dates):
@@ -119,7 +119,20 @@ def calculate_wacc(stock, risk_free_rate=0.035, market_return=0.1, tax_rate=0.21
         # Get required data
         market_price = stock.history(period="1d")["Close"].iloc[-1]
         shares_outstanding = stock.info.get("sharesOutstanding", 0)
-        total_debt = stock.balance_sheet.loc["Total Debt"].iloc[0]  # Most recent
+        # to tet the most recent, the debt array should be sorted first based on
+        # date, so we can use iloc[0] to get the most recent value
+        # Get total debt from balance sheet
+        # Note: "Total Debt" may not be available for all stocks,
+        # so we need to handle this case
+        if "Total Debt" not in stock.balance_sheet.index:
+            print(f"Warning: 'Total Debt' not found in balance sheet for {stock.ticker}")
+            return None
+
+        total_debts = stock.balance_sheet.loc["Total Debt"].sort_index(ascending=False)
+        total_debt = total_debts.iloc[0]  # Most recent
+        if total_debt is None:
+            print(f"Warning: Total debt doesn't exist for {stock.ticker}")
+            return None
 
         # Calculate market cap
         market_cap = market_price * shares_outstanding
@@ -139,7 +152,9 @@ def calculate_wacc(stock, risk_free_rate=0.035, market_return=0.1, tax_rate=0.21
 
         # Cost of Debt (using latest interest expense / total debt)
         try:
-            interest_expense = abs(stock.financials.loc["Interest Expense"].iloc[0])
+            # sort the interest expense based on date
+            interest_expenses = stock.financials.loc["Interest Expense"].sort_index(ascending=False).dropna()
+            interest_expense = abs(interest_expenses.iloc[0])
             cost_of_debt = interest_expense / total_debt
         except:
             cost_of_debt = 0.05  # Default to 5% if calculation fails
@@ -150,7 +165,7 @@ def calculate_wacc(stock, risk_free_rate=0.035, market_return=0.1, tax_rate=0.21
         # Calculate WACC
         wacc = (equity_weight * cost_of_equity) + (debt_weight * after_tax_cost_of_debt)
 
-        return max(wacc, 0.05)  # Ensure minimum discount rate of 5%
+        return max(wacc, 0.08)  # Ensure minimum discount rate of 8%
 
     except Exception as e:
         print(f"WACC calculation error: {str(e)}")
@@ -196,6 +211,18 @@ def save_financial_data(data, symbol, data_type, output_dir):
     # Save to CSV
     data.to_csv(filepath)
     print(f"Saved {data_type} data to {filepath}")
+
+def get_currency_rate(currency):
+    """Get conversion rate from currency to USD"""
+    rates = {
+        'USD': 1.0,
+        'TWD': 0.0313,  # Taiwan Dollar
+        'CNY': 0.1382,  # Chinese Yuan
+        'HKD': 0.1278,  # Hong Kong Dollar
+        'EUR': 1.0843,  # Euro
+        'JPY': 0.00673  # Japanese Yen
+    }
+    return rates.get(currency, 1.0)
 
 def main():
     args = parse_args()
@@ -253,12 +280,17 @@ def main():
             save_financial_data(balance_sheet, symbol, "balancesheet", args.outdir)
             save_financial_data(cashflow, symbol, "cashflow", args.outdir)
 
+            # Get currency information and conversion rate
+            ## convert EPS and DCF values to USD, and keep others in original currency
+            currency = stock.info.get('financialCurrency', 'USD')
+            currency_rate = get_currency_rate(currency)
+            
             # Extract metrics with dates for the specified number of years (no need for ::-1 anymore)
             revenue_data = financials.loc["Total Revenue"][:args.years]
             revenue = revenue_data.values
             revenue_dates = revenue_data.index
             
-            eps_data = financials.loc["Net Income"][:args.years].values / stock.info.get("sharesOutstanding", 1)
+            eps_data = financials.loc["Net Income"][:args.years].values / stock.info.get("sharesOutstanding", 1)*currency_rate
             eps_dates = financials.loc["Net Income"][:args.years].index
             
             fcf_data = cashflow.loc["Free Cash Flow"][:args.years]
@@ -302,8 +334,13 @@ def main():
             # Get current stock price
             current_price = stock.history(period="1d")["Close"].iloc[-1]
             
-            # Calculate DCF with different scenarios
+            # Calculate DCF with different scenarios (convert to USD)
             latest_fcf = fcf[0]
+            DCF_base_metric = "Free Cash Flow"
+            # Use net income as fallback if FCF is not available or negative
+            if latest_fcf is None or latest_fcf <= 0:
+                latest_fcf = financials.loc["Net Income"].values[0]
+                DCF_base_metric = "Net Income"
             
             # 1. DCF with revenue CAGR and WACC
             dcf_value_cagr_wacc = "N/A"
@@ -316,6 +353,8 @@ def main():
                     discount_rate=wacc,
                     years=args.years
                 )
+                if dcf_value_cagr_wacc != "N/A":
+                    dcf_value_cagr_wacc *= currency_rate
             
             # 2. DCF with revenue CAGR and fixed discount rate
             dcf_value_cagr_fixed = calculate_dcf(
@@ -325,7 +364,7 @@ def main():
                 terminal_growth_rate=args.terminal_rate,
                 discount_rate=args.discount_rate,
                 years=args.years
-            )
+            ) * currency_rate
             
             # 3. DCF with fixed growth rate and WACC
             dcf_value_fixed_wacc = "N/A"
@@ -338,6 +377,8 @@ def main():
                     discount_rate=wacc,
                     years=args.years
                 )
+                if dcf_value_fixed_wacc != "N/A":
+                    dcf_value_fixed_wacc *= currency_rate
             
             # 4. DCF with fixed growth rate and discount rate
             dcf_value_fixed_both = calculate_dcf(
@@ -347,9 +388,9 @@ def main():
                 terminal_growth_rate=args.terminal_rate,
                 discount_rate=args.discount_rate,
                 years=args.years
-            )
+            ) * currency_rate
             
-            # Update results dictionary
+            # Store results with currency information
             result = {
                 "Symbol": symbol,
                 "Revenue CAGR": revenue_cagr,
@@ -358,16 +399,20 @@ def main():
                 "Fixed growth rate": args.fixed_growth,
                 "Fixed discount rate": args.discount_rate,
                 "WACC": wacc if wacc is not None else "N/A",
-                "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,
-                "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,
-                f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,
-                f"DCF ({args.fixed_growth:.1%} growth, Fixed Rate)": dcf_value_fixed_both,
+                "DCF Base Metric": DCF_base_metric,
+                "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,  # Now in USD
+                "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,  # Now in USD
+                f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,  # Now in USD
+                f"DCF ({args.fixed_growth:.1%} growth, Fixed Rate)": dcf_value_fixed_both,  # Now in USD
+                "Original Currency": currency,
+                "Currency Rate": currency_rate,
                 "Current Price": current_price,
-                "Debt to Equity Ratio (Latest)": debt_to_equity[0],
-                "Debt to Asset Ratio (Latest)": debt_to_assets[0],
                 "ROE (Latest)": roe[0],
                 "Net Margin (Latest)": net_margin[0],
                 "Book Value Per Share (Latest)": book_value_per_share[0],
+                "EPS (Latest)": eps_data[0],
+                "Debt to Equity Ratio (Latest)": debt_to_equity[0],
+                "Debt to Asset Ratio (Latest)": debt_to_assets[0],
                 "Cash & Equivalents (Latest)": cash[0],
                 "Total Debt (Latest)": total_debt[0],
                 #"Discount Rate Used": discount_rate,
