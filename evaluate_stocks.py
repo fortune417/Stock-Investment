@@ -342,6 +342,9 @@ def main():
                 latest_fcf = financials.loc["Net Income"].values[0]
                 DCF_base_metric = "Net Income"
             
+            # Also calculate the current FCF per share and save in results
+            current_fcf_per_share = latest_fcf / shares_outstanding * currency_rate
+           
             # 1. DCF with revenue CAGR and WACC
             dcf_value_cagr_wacc = "N/A"
             if wacc is not None:
@@ -400,6 +403,7 @@ def main():
                 "Fixed discount rate": args.discount_rate,
                 "WACC": wacc if wacc is not None else "N/A",
                 "DCF Base Metric": DCF_base_metric,
+                "Current FCF per Share": current_fcf_per_share,  # Now in USD
                 "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,  # Now in USD
                 "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,  # Now in USD
                 f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,  # Now in USD
