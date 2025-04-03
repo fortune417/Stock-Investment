@@ -6,6 +6,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import os
+import time
 
 __version__ = "0.0.4"
 
@@ -181,7 +182,17 @@ def read_stock_symbols(file_path):
 
 # Parse command-line arguments using argparse
 def parse_args():
-    parser = argparse.ArgumentParser(description="Analyze stock financial data and calculate metrics.")
+    desc = f"""
+    Evaluate stocks using financial data from Yahoo Finance (v{__version__}).
+    Note that the larger of the shares outstanding and implied shares outstanding
+    will be used for DCF calculation. The program fetches financial data, calculates
+    various metrics, and saves the results to a CSV file.
+
+    Also for each stock symbol, their financial data will be saved to CSV files
+    with the format YYYYMM_<symbol>_<data_type>.csv in the specified output directory.
+    The data types include financials, balance sheet, and cash flow statements.
+    """
+    parser = argparse.ArgumentParser(description=desc)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--list", type=str, help="Comma-separated list of stock symbols (e.g., AAPL,MSFT,GOOGL).")
     group.add_argument("--file", type=str, help="Path to a file containing stock symbols (one per line).")
@@ -196,6 +207,8 @@ def parse_args():
     parser.add_argument("--risk-free-rate", type=float, default=0.035, help="Risk-free rate for WACC calculation (default: %(default)s)")
     parser.add_argument("--market-return", type=float, default=0.1, help="Market return for WACC calculation (default: %(default)s)")
     parser.add_argument("--tax-rate", type=float, default=0.21, help="Tax rate for WACC calculation (default: %(default)s)")
+    parser.add_argument("--delay", type=float, default=2.0, 
+                       help="Delay time in seconds between API requests (default: %(default)s)")
     return parser.parse_args()
 
 def save_financial_data(data, symbol, data_type, output_dir):
@@ -251,6 +264,8 @@ def main():
     for symbol in symbols:
         try:
             print(f"Processing {symbol}...")
+            time.sleep(args.delay)  # Add delay between stocks
+            
             stock = yf.Ticker(symbol)
 
             # Validate stock data
@@ -259,8 +274,11 @@ def main():
                 continue
 
             # Get financial data with validation
-            financials = stock.financials.sort_index(ascending=False) # sorting rows
+            time.sleep(args.delay)
+            financials = stock.financials.sort_index(ascending=False)
+            time.sleep(args.delay)
             balance_sheet = stock.balance_sheet.sort_index(ascending=False)
+            time.sleep(args.delay)
             cashflow = stock.cashflow.sort_index(ascending=False)
             
             # Align indices and fill missing years with NaN
@@ -309,8 +327,8 @@ def main():
             roe = financials.loc["Net Income"][:args.years].values / balance_sheet.loc["Stockholders Equity"][:args.years].values
             net_margin = financials.loc["Net Income"][:args.years].values / financials.loc["Total Revenue"][:args.years].values
 
-            # Book Value Per Share
-            book_value_per_share = balance_sheet.loc["Stockholders Equity"][:args.years].values / stock.info.get("sharesOutstanding", 1)
+            # Book Value Per Share in USD
+            book_value_per_share = balance_sheet.loc["Stockholders Equity"][:args.years].values / stock.info.get("sharesOutstanding", 1)*currency_rate
 
             # Calculate average annual growth rates with dates
             revenue_cagr = calculate_cagr(revenue, revenue_dates)
@@ -321,6 +339,11 @@ def main():
             shares_outstanding = stock.info.get("sharesOutstanding", 0)
             if shares_outstanding <= 0:
                 print(f"Warning: Invalid shares outstanding for {symbol}")
+                continue
+            # Get implied shares outstanding with validation
+            implied_shares_outstanding = stock.info.get("impliedSharesOutstanding", 0)
+            if implied_shares_outstanding <= 0:
+                print(f"Warning: Invalid implied shares outstanding for {symbol}")
                 continue
 
             # Calculate WACC for discount rate
@@ -342,8 +365,18 @@ def main():
                 latest_fcf = financials.loc["Net Income"].values[0]
                 DCF_base_metric = "Net Income"
             
+            # It seems there are errors for some stocks regarding the number of shares,
+            # such as Googl, IBKR, and JD, and for some the implied shares are smaller
+            # than the outstanding shares, so for conservative calculation, we should
+            # use the larger one
+            shares_for_dcf = implied_shares_outstanding if implied_shares_outstanding > shares_outstanding else shares_outstanding
+            # make sure the shares_for_dcf is not zero
+            if shares_for_dcf <= 0:
+                print(f"Warning: Invalid shares for DCF calculation for {symbol}")
+                continue
+
             # Also calculate the current FCF per share and save in results
-            current_fcf_per_share = latest_fcf / shares_outstanding * currency_rate
+            current_fcf_per_share = latest_fcf / shares_for_dcf * currency_rate
            
             # 1. DCF with revenue CAGR and WACC
             dcf_value_cagr_wacc = "N/A"
@@ -351,7 +384,7 @@ def main():
                 dcf_value_cagr_wacc = calculate_dcf(
                     free_cash_flow=latest_fcf,
                     growth_rate=revenue_cagr,
-                    shares_outstanding=shares_outstanding,
+                    shares_outstanding=shares_for_dcf,  # Changed
                     terminal_growth_rate=args.terminal_rate,
                     discount_rate=wacc,
                     years=args.years
@@ -363,7 +396,7 @@ def main():
             dcf_value_cagr_fixed = calculate_dcf(
                 free_cash_flow=latest_fcf,
                 growth_rate=revenue_cagr,
-                shares_outstanding=shares_outstanding,
+                shares_outstanding=shares_for_dcf,  # Changed
                 terminal_growth_rate=args.terminal_rate,
                 discount_rate=args.discount_rate,
                 years=args.years
@@ -375,7 +408,7 @@ def main():
                 dcf_value_fixed_wacc = calculate_dcf(
                     free_cash_flow=latest_fcf,
                     growth_rate=args.fixed_growth,
-                    shares_outstanding=shares_outstanding,
+                    shares_outstanding=shares_for_dcf,  # Changed
                     terminal_growth_rate=args.terminal_rate,
                     discount_rate=wacc,
                     years=args.years
@@ -387,7 +420,7 @@ def main():
             dcf_value_fixed_both = calculate_dcf(
                 free_cash_flow=latest_fcf,
                 growth_rate=args.fixed_growth,
-                shares_outstanding=shares_outstanding,
+                shares_outstanding=shares_for_dcf,  # Changed
                 terminal_growth_rate=args.terminal_rate,
                 discount_rate=args.discount_rate,
                 years=args.years
@@ -399,27 +432,32 @@ def main():
                 "Revenue CAGR": revenue_cagr,
                 "EPS CAGR": eps_cagr,
                 "FCF CAGR": fcf_cagr,
+                "Shares Outstanding": stock.info.get("sharesOutstanding", 0),
+                "Implied Shares Outstanding": stock.info.get("impliedSharesOutstanding", 0),
                 "Fixed growth rate": args.fixed_growth,
                 "Fixed discount rate": args.discount_rate,
                 "WACC": wacc if wacc is not None else "N/A",
                 "DCF Base Metric": DCF_base_metric,
-                "Current FCF per Share": current_fcf_per_share,  # Now in USD
-                "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,  # Now in USD
-                "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,  # Now in USD
-                f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,  # Now in USD
-                f"DCF ({args.fixed_growth:.1%} growth, Fixed Rate)": dcf_value_fixed_both,  # Now in USD
+                "Current FCF per Share": current_fcf_per_share,
+                "DCF (CAGR growth, WACC)": dcf_value_cagr_wacc,
+                "DCF (CAGR growth, Fixed Rate)": dcf_value_cagr_fixed,
+                f"DCF ({args.fixed_growth:.1%} growth, WACC)": dcf_value_fixed_wacc,
+                f"DCF ({args.fixed_growth:.1%} growth, Fixed Rate)": dcf_value_fixed_both,
                 "Original Currency": currency,
                 "Currency Rate": currency_rate,
                 "Current Price": current_price,
-                "ROE (Latest)": roe[0],
-                "Net Margin (Latest)": net_margin[0],
-                "Book Value Per Share (Latest)": book_value_per_share[0],
-                "EPS (Latest)": eps_data[0],
-                "Debt to Equity Ratio (Latest)": debt_to_equity[0],
-                "Debt to Asset Ratio (Latest)": debt_to_assets[0],
-                "Cash & Equivalents (Latest)": cash[0],
-                "Total Debt (Latest)": total_debt[0],
-                #"Discount Rate Used": discount_rate,
+                # Try to get latest values from stock.info first, fall back to historical data
+                "ROE (Latest)": stock.info.get('returnOnEquity', roe[0]),
+                "Net Margin (Latest)": stock.info.get('profitMargins', net_margin[0]),
+                "Book Value Per Share (Latest)": (
+                    stock.info.get('bookValue') * currency_rate if 'bookValue' in stock.info 
+                    else book_value_per_share[0] ## already in USD
+                ),
+                "EPS (Latest)": stock.info.get('trailingEPS', eps_data[0]),
+                "Debt to Equity Ratio (Latest)": stock.info.get('debtToEquity', debt_to_equity[0])/100 if 'debtToEquity' in stock.info else debt_to_equity[0],
+                "Debt to Asset Ratio (Latest)": debt_to_assets[0],  # Not typically available in stock.info
+                "Cash & Equivalents (Latest)": stock.info.get('totalCash', cash[0]),
+                "Total Debt (Latest)": stock.info.get('totalDebt', total_debt[0]),
             }
 
             # Add historical data for each year
